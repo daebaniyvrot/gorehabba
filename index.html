@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Гарехабба — фестиваль</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/touch.css">
+</head>
+<body>
+<div id="game"></div>
+
+<div id="ui-root">
+  <div id="hud" class="hidden">
+    <div class="chip" id="hud-money">₹150</div>
+    <div class="chip" id="hud-ammo">💩 8</div>
+    <div class="chip meter-chip">👕 <span class="meter" id="hud-dirt"><span class="fill"></span></span></div>
+    <div class="chip meter-chip">🦨 <span class="meter" id="hud-stink"><span class="fill"></span></span></div>
+    <div class="chip" id="hud-items"></div>
+  </div>
+  <div id="hud-quest" class="hidden"></div>
+
+  <div id="charge" class="hidden"><span class="fill"></span></div>
+  <div id="prompt"></div>
+  <div id="toasts"></div>
+  <div id="floatings"></div>
+  <div id="stink-overlay"></div>
+  <div id="panels"></div>
+  <div id="photo-ui" class="hidden"></div>
+  <div id="quest-panel" class="hidden"></div>
+
+  <div id="start-screen">
+    <div class="start-card">
+      <h1>ГАРЕХАББА</h1>
+      <p class="tagline">Вы приехали в индийскую деревню — и фестиваль начинается прямо сейчас, саар!</p>
+      <p class="note">Вдохновлено настоящим фестивалем Gorehabba (деревня Гуматапура, Карнатака).
+      Попадание лепёшкой здесь — к удаче. 🐄🎉</p>
+      <div class="controls-help">
+        <span>WASD — бег</span><span>Space — прыжок (двойной!)</span><span>ЛКМ — замах и бросок</span>
+        <span>ПКМ — зонтик</span><span>Q — «СААР!»</span><span>E — взаимодействие</span>
+        <span>P — фоторежим</span><span>Tab — квесты</span>
+      </div>
+      <div class="start-name">
+        <input id="player-name" maxlength="16" placeholder="Твоё имя, саар" autocomplete="off">
+      </div>
+      <div class="start-buttons">
+        <button class="btn primary" id="btn-new">Начать фестиваль</button>
+        <button class="btn" id="btn-continue">Продолжить</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
