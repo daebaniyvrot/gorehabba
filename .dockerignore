@@ -1,0 +1,12 @@
+# В образ идут только: index.html, src/, css/, vendor/, server/, package*.json.
+node_modules
+.git
+.claude
+*.md
+serve.py
+Dockerfile
+docker-compose.yml
+.dockerignore
+npm-debug.log
+*.log
+.DS_Store

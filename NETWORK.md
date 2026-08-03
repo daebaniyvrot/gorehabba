@@ -1,0 +1,121 @@
+# NETWORK — контракт мультиплеера (при конфликте с INTERFACES.md главнее этот файл в сетевой части)
+
+Модель: лёгкий co-presence мультиплеер. Общий мир — игроки видят друг друга,
+кидаются друг в друга, кричат «СААР!». NPC, квесты, экономика, сейв — локальные
+у каждого клиента (это дизайн-решение, не баг: фестиваль у каждого свой, а
+саары — общие).
+
+## Транспорт
+
+WebSocket на том же origin: `ws(s)://<host>/ws`. Сервер Node (`server/server.js`)
+раздаёт и статику игры, и WS. Порт из env `PORT`, по умолчанию 8137.
+Сообщения — JSON, одна строка на сообщение.
+
+## Протокол
+
+Клиент → сервер:
+| t       | поля                                   | смысл |
+|---------|----------------------------------------|-------|
+| hi      | name (строка ≤16)                      | представиться (первое сообщение) |
+| s       | p:[x,y,z], ry, mv (0..1), d (0..100), u (bool) | снапшот состояния, ~10 Гц |
+| throw   | from:[x,y,z], dir:[x,y,z], power (0..1)| бросок лепёшки |
+| shout   | —                                      | крик «СААР!» |
+| hit     | —                                      | «в меня попали» (для смеха у других) |
+
+Сервер → клиент:
+| t       | поля                                    | смысл |
+|---------|-----------------------------------------|-------|
+| welcome | id, players:[{id,name,p,ry,d,u}]        | твой id и текущие игроки |
+| join    | id, name                                | игрок вошёл |
+| leave   | id                                      | игрок вышел |
+| s       | id, p, ry, mv, d, u                     | релей снапшота |
+| throw   | id, from, dir, power                    | релей броска |
+| shout   | id                                      | релей крика |
+| hit     | id                                      | релей попадания |
+| n       | count                                   | число игроков (при изменениях) |
+
+Сервер: комната одна, cap 16 игроков (лишним — {t:'full'} и закрытие),
+rate-limit бросков ~4/с и снапшотов ~20/с на клиента, name — trim, ≤16 симв.,
+пустое → «Саар-<id>». Мёртвые сокеты чистятся ping/pong каждые 30 с.
+Сервер НЕ доверяет полям слепо: числа приводятся Number(), NaN → отбрасывается
+сообщение; строки обрезаются.
+
+## Файлы и владение
+
+| Кто      | Файлы |
+|----------|-------|
+| server   | server/server.js, Dockerfile, docker-compose.yml, .dockerignore, DEPLOY.md |
+| client   | src/net.js |
+
+main.js, index.html, package.json уже подготовлены — НЕ трогать.
+
+## Клиент: src/net.js
+
+```js
+export function createNet({ scene, player, projectiles }) -> {
+  update(dt),   // main вызывает каждый кадр (в т.ч. в menu)
+}
+```
+
+Поведение:
+- Подключение сразу при создании; reconnect с бэкоффом (1с → макс 15с) при обрыве.
+  Если WS недоступен — тихий одиночный режим, никаких ошибок в консоль чаще
+  одного предупреждения.
+- Имя: из `#player-name` (input на стартовом экране), fallback localStorage
+  'garehabba-name', fallback ''. При отправке 'hi' сохранить в localStorage.
+- Отправка снапшота каждые 100 мс, только когда state.mode !== 'menu':
+  p из player.getPosition(), ry — yaw модели (player.object3d.rotation.y),
+  mv — грубая скорость 0..1 (по перемещению с прошлого снапшота), d — state.dirtiness,
+  u — state.umbrellaUp.
+- Локальные события наружу: подписаться на bus 'throw' НЕЛЬЗЯ (там нет from/dir) —
+  вместо этого net патчит НИЧЕГО НЕ ПАТЧИТ, а слушает bus-события:
+  - 'playerShout' → {t:'shout'}
+  - 'playerHit' → {t:'hit'}
+  - бросок: слушать bus 'playerThrow' {from:{x,y,z}, dir:{x,y,z}, power} —
+    ЭТО НОВОЕ СОБЫТИЕ, его эмитит player.js при doThrow (уже добавлено в player.js).
+- Удалённые игроки: меш — низкополигональный человечек в стиле игры (собрать
+  самому из боксов, яркая рубашка по хэшу id; НЕ импортировать npc.js, чтобы
+  не плодить связность), бейдж имени — Sprite с CanvasTexture (textContent-безопасно:
+  имя рисуется текстом на канвасе), высота ~2.1. Интерполяция: буфер последних
+  двух снапшотов, рендер с задержкой 120 мс, lerp позиции и угла; mv > 0.1 —
+  простая анимация ходьбы (качание рук/ног или подпрыгивание), грязь d → затемнение
+  рубашки, u → показать зонтик (упрощённый).
+- Удалённый throw → projectiles.throwDung({from, dir, power, owner:'net:'+id})
+  (Vector3 создать из массивов). Такой снаряд может попасть в МОЕГО игрока —
+  это желаемое поведение (цель 'player' зарегистрирована).
+- Каждый удалённый игрок регистрируется целью: projectiles.registerTarget({
+  id:'net:'+id, getPosition, radius:0.35, height:1.7, onHit(info) }) — onHit:
+  визуальный сплэш уже делает physics; если info.owner==='player' — toast
+  «Попал по <имя>! 🎯» с кулдауном 1 с. Разрегистрации нет в API physics —
+  при leave пометить цель мёртвой: getPosition возвращает точку (0,-999,0).
+- Удалённый shout → bus 'floating' {pos над головой, text:'СААР!', size:'big'} +
+  audio.shout(); удалённый hit → bus 'floating' «Ха-ха!» над СВОИМ игроком не надо —
+  просто звук audio.laugh() если тот игрок в 25 м.
+- Счётчик: чип «👥 N» добавить в #hud (создать элемент самому, класс chip);
+  обновлять по 'welcome'/'join'/'leave'/'n'. При отключении — «👥 —».
+- Всё в try/catch: сетевые сбои не должны ронять кадр.
+
+## Сервер: server/server.js
+
+Node ≥ 20, ESM (package.json уже "type":"module"). Зависимость только `ws`.
+- HTTP: статика из корня проекта (index.html, src/, css/, vendor/), MIME для
+  .html/.js/.css/.json/.md; Cache-Control: no-store (программа маленькая, зато
+  правки подхватываются). Путь нормализовать, запретить выход из корня (../).
+  Healthcheck: GET /healthz → 200 "ok".
+- WS на том же сервере, path /ws. Логика по протоколу выше. Лог в stdout:
+  join/leave/count (без спама снапшотами).
+- Грейсфул-шатдаун по SIGTERM/SIGINT (docker stop).
+
+## Docker
+
+- Dockerfile: node:22-alpine, WORKDIR /app, COPY package*.json → npm ci --omit=dev,
+  COPY остального (см. .dockerignore), ENV PORT=8137, EXPOSE 8137,
+  USER node, CMD ["node", "server/server.js"].
+- .dockerignore: node_modules, .claude, *.md кроме нужных? (SPEC/INTERFACES/NETWORK
+  можно исключить — серверу не нужны; НО DEPLOY.md тоже не нужен в образе), .git.
+  ВАЖНО: vendor/, src/, css/, index.html, server/, package*.json — в образ.
+- docker-compose.yml: сервис garehabba, build: ., ports "8137:8137",
+  restart: unless-stopped, healthcheck на /healthz (wget или node fetch),
+  environment PORT=8137.
+- DEPLOY.md: краткая инструкция по-русски: docker compose up -d --build,
+  как сменить порт, как посмотреть логи.

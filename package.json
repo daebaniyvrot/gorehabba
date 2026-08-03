@@ -1,0 +1,10 @@
+{
+  "name": "garehabba",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Гарехабба — 3D фестиваль. Браузерная игра на Three.js без сборки.",
+  "dependencies": {
+    "ws": "^8.21.1"
+  }
+}
