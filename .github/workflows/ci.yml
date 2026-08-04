@@ -23,10 +23,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Чекаут
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Node 22 (с кешем npm)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -62,7 +62,7 @@ jobs:
 
       - name: Артефакт с lcov-отчётом
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: coverage/lcov.info
@@ -75,7 +75,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Чекаут
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Сборка образа
         run: docker build -t garehabba:ci .
