@@ -1,0 +1,104 @@
+# CI «Гарехаббы»: юнит- и интеграционные тесты + докер-смоук.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Новый пуш в ту же ветку отменяет устаревшие прогоны.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # Явный bash => -e -o pipefail: падение любого звена пайпа валит шаг.
+    shell: bash
+
+jobs:
+  tests:
+    name: Тесты
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Чекаут
+        uses: actions/checkout@v4
+
+      - name: Node 22 (с кешем npm)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Зависимости
+        run: npm ci
+
+      - name: Синтаксис
+        run: |
+          for f in src/*.js server/*.js; do
+            echo "node --check $f"
+            node --check "$f"
+          done
+
+      - name: Тесты
+        run: npm test
+
+  docker:
+    name: Докер-смоук
+    runs-on: ubuntu-latest
+    needs: tests
+    timeout-minutes: 10
+    steps:
+      - name: Чекаут
+        uses: actions/checkout@v4
+
+      - name: Сборка образа
+        run: docker build -t garehabba:ci .
+
+      - name: Запуск контейнера (порт 8137, без volume)
+        run: docker run -d --name garehabba-ci -p 8137:8137 garehabba:ci
+
+      - name: "Смоук: /healthz отвечает ok"
+        run: |
+          for i in $(seq 1 30); do
+            body="$(curl -sf http://localhost:8137/healthz || true)"
+            if [ "$body" = "ok" ]; then
+              echo "сервер жив (попытка $i)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::сервер не ответил ok на /healthz за 30 секунд"
+          exit 1
+
+      - name: "Смоук: главная страница содержит ГАРЕХАББА"
+        run: |
+          curl -sf http://localhost:8137/ -o page-smoke.html
+          grep -q "ГАРЕХАББА" page-smoke.html
+
+      - name: "Смоук: POST /api/score виден в GET /api/scores"
+        run: |
+          curl -sf -X POST http://localhost:8137/api/score \
+            -H 'Content-Type: application/json' \
+            -d '{"id":"ci-smoke-id","name":"СмоукСаар","money":777}' \
+            -o post-smoke.json
+          grep -q '"ok":true' post-smoke.json
+          curl -sf http://localhost:8137/api/scores | tee scores-smoke.json
+          echo
+          grep -q "СмоукСаар" scores-smoke.json
+          grep -q '"money":777' scores-smoke.json
+
+      - name: "Смоук: /data/scores.json не раздаётся (404)"
+        run: |
+          code="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8137/data/scores.json)"
+          echo "HTTP $code"
+          test "$code" = "404"
+
+      - name: Логи контейнера (при падении)
+        if: failure()
+        run: docker logs garehabba-ci || true
+
+      - name: Остановка контейнера
+        if: always()
+        run: docker rm -f garehabba-ci || true
