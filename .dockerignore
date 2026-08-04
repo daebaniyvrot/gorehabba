@@ -11,3 +11,5 @@ docker-compose.yml
 npm-debug.log
 *.log
 .DS_Store
+tests
+.github

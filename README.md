@@ -1,5 +1,7 @@
 # Гарехабба 💩🛺
 
+[![CI](https://github.com/daebaniyvrot/gorehabba/actions/workflows/ci.yml/badge.svg)](https://github.com/daebaniyvrot/gorehabba/actions/workflows/ci.yml)
+
 Мультиплеерная 3D-браузерная игра про фестиваль кидания коровьими лепёшками —
 по мотивам настоящего фестиваля [Gorehabba](https://en.wikipedia.org/wiki/Gorehabba)
 (деревня Гуматапура, Карнатака, Индия), где попадание лепёшкой — к удаче.
