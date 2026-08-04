@@ -49,9 +49,10 @@ function cleanName(raw, id) {
 
 // ---------- Скорборд: хранилище очков + персистентность ----------
 const SCORES_FILE = process.env.SCORES_FILE || path.join(ROOT, 'data', 'scores.json');
-const SCORES_MAX_IDS = 500;               // максимум разных id (новые вытесняют худших)
+// Лимиты настраиваются через env ТОЛЬКО для тестов; дефолты — продовые значения.
+const SCORES_MAX_IDS = Number(process.env.SCORES_MAX_IDS || 500); // максимум разных id (новые вытесняют худших)
 const SCORES_TOP = 20;                    // сколько отдаём в GET /api/scores
-const SCORE_POST_MIN_MS = 5000;           // ≥5 с между POST с одного id и с одного IP
+const SCORE_POST_MIN_MS = Number(process.env.SCORE_POST_MIN_MS || 5000); // ≥5 с между POST с одного id и с одного IP
 const SCORE_MAX_BODY = 2048;              // Content-Length ≤ 2КБ
 const SCORES_SAVE_DEBOUNCE_MS = 2000;     // дебаунс записи файла
 

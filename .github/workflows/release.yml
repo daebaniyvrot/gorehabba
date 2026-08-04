@@ -1,0 +1,164 @@
+# Релиз «Гарехаббы»: тесты → сборка → прод-репетиция → пуш в GHCR → тег и GitHub Release.
+# Запускается только вручную (Actions → «Релиз» → Run workflow).
+name: Релиз
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Версия релиза без ведущего v, формат X.Y.Z (например 1.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+# Релизы не отменяем: второй запуск просто ждёт в очереди.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # Явный bash => -e -o pipefail: падение любого звена пайпа валит шаг.
+    shell: bash
+
+jobs:
+  release:
+    name: Релиз
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: "Страховка: релиз только с main"
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::Релиз запускается только с main (сейчас: ${REF})"
+            exit 1
+          fi
+
+      - name: Валидация версии (X.Y.Z, без ведущего v)
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Версия «${VERSION}» не по формату X.Y.Z (например 1.1.0, без ведущего v)"
+            exit 1
+          fi
+          echo "Версия ${VERSION} — ок"
+
+      - name: Чекаут (вся история — для тега и авто-нот релиза)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "Страховка: тег v${{ inputs.version }} свободен (или указывает на этот же коммит)"
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Идемпотентность: если прошлый запуск успел создать тег, но упал позже
+          # (например на gh release create), перезапуск ТОЙ ЖЕ версии с ТОГО ЖЕ
+          # коммита разрешён. Тег на другом коммите — это чужая версия, стоп.
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            remote_commit="$(git ls-remote origin "refs/tags/v${VERSION}^{}" | cut -f1)"
+            [ -n "$remote_commit" ] || remote_commit="$(git ls-remote origin "refs/tags/v${VERSION}" | cut -f1)"
+            if [ "$remote_commit" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::Тег v${VERSION} уже существует и указывает на другой коммит — такая версия уже выпущена, возьмите следующую"
+              exit 1
+            fi
+            echo "Тег v${VERSION} уже на этом коммите — идемпотентный перезапуск релиза"
+          else
+            echo "Тег v${VERSION} свободен"
+          fi
+
+      - name: Node 22 (с кешем npm)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Зависимости
+        run: npm ci
+
+      - name: Синтаксис
+        run: |
+          for f in src/*.js server/*.js; do
+            echo "node --check $f"
+            node --check "$f"
+          done
+
+      - name: Тесты с покрытием
+        run: npm run test:coverage
+
+      # ВАЖНО: тестовый образ и релизный собираются ОДНИМ buildx-билдером с общим
+      # gha-кэшем — в GHCR уезжают ровно те amd64-слои, что прошли прод-репетицию.
+      - name: QEMU (эмуляция arm64 для мультиарх-сборки)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Сборка образа для прод-репетиции (amd64, из общего кэша)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: garehabba:prod-test
+          labels: |
+            org.opencontainers.image.source=https://github.com/daebaniyvrot/gorehabba
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Прод-репетиция (nginx-прокси как в бою)
+        env:
+          IMAGE: garehabba:prod-test
+        run: bash tests/prod/run.sh
+
+      - name: Логин в GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Пуш мультиарх-образа в GHCR (версия + latest)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/daebaniyvrot/gorehabba:${{ inputs.version }}
+            ghcr.io/daebaniyvrot/gorehabba:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/daebaniyvrot/gorehabba
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Git-тег v${{ inputs.version }} (если ещё нет)
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "Тег v${VERSION} уже в origin — пропускаем (идемпотентный перезапуск)"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "Релиз v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: GitHub Release с авто-нотами (если ещё нет)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Релиз v${VERSION} уже существует — пропускаем"
+            exit 0
+          fi
+          gh release create "v${VERSION}" --title "v${VERSION}" --generate-notes
