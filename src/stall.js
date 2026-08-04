@@ -362,16 +362,21 @@ export function createStall(scene, world, player, npcs) {
     setMode('battle');
     bus.emit('battleStart', {});
     buildBattleUI();
+    // на таче целиться пальцем труднее — зона шире, маркер спокойнее
+    const touchy = document.body.classList.contains('touch-device');
     battle = {
       round: 1, score: 0,
-      pos: 0, dir: 1, speed: 1.6,
-      zoneL: 0.4, zoneW: 0.2,
+      pos: 0, dir: 1, speed: touchy ? 1.25 : 1.6,
+      zoneL: 0.4, zoneW: touchy ? 0.3 : 0.2,
+      zoneWBase: touchy ? 0.26 : 0.16, // newZone() строит ширину от этой базы
       roundTimer: 6, running: true,
       endDelay: 0, won: false,
     };
     newZone();
     updateRoundEl();
-    setStatus('ТОРГОВАЯ БИТВА! Маркер в зелёной зоне — жми Q!');
+    setStatus(touchy
+      ? 'ТОРГОВАЯ БИТВА! Маркер в зелёной зоне — тапай «СААР!» или экран!'
+      : 'ТОРГОВАЯ БИТВА! Маркер в зелёной зоне — жми Q!');
     log('Кто громче крикнет «СААР!» — тот и продаёт.');
     refreshButtons();
   }
@@ -412,7 +417,9 @@ export function createStall(scene, world, player, npcs) {
 
   function newZone() {
     if (!battle) return;
-    battle.zoneW = 0.16 + Math.random() * 0.08; // ширина ~20%
+    // база зависит от устройства (на таче шире), случайный разброс поверх
+    const base = battle.zoneWBase || 0.16;
+    battle.zoneW = base + Math.random() * 0.08;
     battle.zoneL = Math.random() * (1 - battle.zoneW);
     if (zoneEl) {
       zoneEl.style.left = (battle.zoneL * 100).toFixed(1) + '%';

@@ -121,6 +121,20 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #1a120b;
 .controls-help { display: flex; flex-wrap: wrap; gap: 6px 14px; justify-content: center;
   font-size: 13px; opacity: .9; margin-bottom: 22px; }
 .controls-help span { background: rgba(0,0,0,.25); padding: 3px 10px; border-radius: 999px; }
+.start-links { font-size: 14px; margin-bottom: 14px; }
+.start-links a { color: #ffd27a; text-decoration: none; border-bottom: 1px dotted rgba(255,210,122,.6); }
+.start-links a:hover { color: #ffe66d; }
+.start-links .sep { opacity: .5; margin: 0 8px; }
+
+#scoreboard { max-width: 420px; margin: 0 auto 16px; background: rgba(0,0,0,.25);
+  border: 1px solid rgba(201,141,62,.5); border-radius: 12px; padding: 10px 16px; text-align: left; }
+#scoreboard .sb-title { font-weight: 800; color: #ffd27a; text-align: center; margin-bottom: 6px; }
+#scoreboard .sb-list { margin: 0; padding-left: 26px; font-size: 14px; max-height: 168px; overflow-y: auto; }
+#scoreboard .sb-list li { padding: 2px 0; }
+#scoreboard .sb-list .sb-money { float: right; color: #ffe66d; font-weight: 700; }
+#scoreboard .sb-list .sb-me { color: #ffe66d; }
+#scoreboard .sb-empty { opacity: .7; text-align: center; font-size: 13px; }
+
 .start-name { margin-bottom: 14px; }
 .start-name input { background: rgba(0,0,0,.3); border: 1px solid #c98d3e; border-radius: 10px;
   color: #ffe9c7; font-family: inherit; font-size: 16px; font-weight: 700; text-align: center;

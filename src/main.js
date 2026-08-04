@@ -14,6 +14,7 @@ import { createPhotoMode } from './photo.js';
 import { createUI } from './ui.js';
 import { createNet } from './net.js';
 import { createTouch } from './touch.js';
+import { createScores } from './scores.js';
 
 // ---------- Рендерер / сцена / камера ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -61,6 +62,7 @@ const photo = createPhotoMode(scene, camera, renderer, { world, player, npcs });
 const ui = createUI();
 const net = createNet({ scene, player, projectiles });
 const touch = createTouch({ player });
+const scores = createScores();
 
 // Коровы священны: регистрируем как цели, попадание — штраф.
 (world.cows || []).forEach((cow, i) => {
@@ -129,6 +131,20 @@ function doSave() {
 }
 setInterval(doSave, 20000);
 window.addEventListener('beforeunload', doSave);
+// мобильные браузеры убивают вкладки без beforeunload — сохраняемся при сворачивании
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') doSave();
+});
+
+// потеря WebGL-контекста (типично для iOS) — не смерть, а пауза
+renderer.domElement.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault();
+  doSave();
+  bus.emit('toast', { text: '⚠️ Графика перезапускается, саар, секундочку…', ms: 3500 });
+});
+renderer.domElement.addEventListener('webglcontextrestored', () => {
+  bus.emit('toast', { text: '✅ Порядок — фестиваль продолжается!', ms: 2200 });
+});
 
 // ---------- Ошибки — в тост (и это не «индийский вайб», чиним) ----------
 window.addEventListener('error', (e) => {

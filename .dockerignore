@@ -2,6 +2,7 @@
 node_modules
 .git
 .claude
+data
 *.md
 serve.py
 Dockerfile

@@ -3,6 +3,7 @@
 // Протокол и требования — NETWORK.md (контракт, исполняется буквально).
 
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +47,145 @@ function cleanName(raw, id) {
   return name || `Саар-${id}`;
 }
 
+// ---------- Скорборд: хранилище очков + персистентность ----------
+const SCORES_FILE = process.env.SCORES_FILE || path.join(ROOT, 'data', 'scores.json');
+const SCORES_MAX_IDS = 500;               // максимум разных id (новые вытесняют худших)
+const SCORES_TOP = 20;                    // сколько отдаём в GET /api/scores
+const SCORE_POST_MIN_MS = 5000;           // ≥5 с между POST с одного id и с одного IP
+const SCORE_MAX_BODY = 2048;              // Content-Length ≤ 2КБ
+const SCORES_SAVE_DEBOUNCE_MS = 2000;     // дебаунс записи файла
+
+const scores = new Map(); // id -> { name, money, quests, hits, battles, photos, ts }
+
+// Целое с клампом; NaN/мусор → 0 (контракт скорборда).
+function clampInt(v, min, max) {
+  let n = Number(v);
+  if (!Number.isFinite(n)) n = 0;
+  n = Math.round(n);
+  if (n < min) return min;
+  if (n > max) return max;
+  return n;
+}
+
+function cleanScoreName(raw) {
+  let name = typeof raw === 'string' ? raw : '';
+  name = name.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 16).trim();
+  return name || 'Саар';
+}
+
+function sanitizeScore(rec) {
+  return {
+    name: cleanScoreName(rec.name),
+    money: clampInt(rec.money, 0, 9_999_999),
+    quests: clampInt(rec.quests, 0, 8),
+    hits: clampInt(rec.hits, 0, 999_999),
+    battles: clampInt(rec.battles, 0, 999_999),
+    photos: clampInt(rec.photos, 0, 999_999),
+    ts: clampInt(rec.ts ?? Date.now(), 0, 8_640_000_000_000_000),
+  };
+}
+
+// Худшая запись — с минимальным money (при равенстве — самая старая).
+function evictWorstScore() {
+  let worstId = null, worst = null;
+  for (const [id, r] of scores) {
+    if (!worst || r.money < worst.money || (r.money === worst.money && r.ts < worst.ts)) {
+      worst = r; worstId = id;
+    }
+  }
+  if (worstId !== null) scores.delete(worstId);
+}
+
+function loadScores() {
+  try {
+    fs.mkdirSync(path.dirname(SCORES_FILE), { recursive: true });
+  } catch (e) {
+    console.warn('[scores] не удалось создать каталог для очков:', e && e.message ? e.message : e);
+  }
+  try {
+    if (!fs.existsSync(SCORES_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(SCORES_FILE, 'utf8'));
+    if (!Array.isArray(data)) throw new Error('ожидался массив записей');
+    for (const rec of data) {
+      if (!rec || typeof rec !== 'object' || typeof rec.id !== 'string' || !rec.id) continue;
+      scores.set(rec.id.slice(0, 64), sanitizeScore(rec));
+      if (scores.size >= SCORES_MAX_IDS) break;
+    }
+    console.log(`[scores] загружено записей: ${scores.size} (${SCORES_FILE})`);
+  } catch (e) {
+    console.warn('[scores] файл очков битый или нечитаемый — начинаем с пустого списка:',
+      e && e.message ? e.message : e);
+    scores.clear();
+  }
+}
+
+let scoresDirty = false;
+let scoresSaveTimer = null;
+
+// Атомарная запись: tmp + rename, чтобы не оставить полфайла.
+function saveScoresNow() {
+  if (!scoresDirty) return;
+  scoresDirty = false;
+  try {
+    const arr = [];
+    for (const [id, r] of scores) arr.push({ id, ...r });
+    const tmp = SCORES_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(arr));
+    fs.renameSync(tmp, SCORES_FILE);
+  } catch (e) {
+    console.warn('[scores] не удалось сохранить очки:', e && e.message ? e.message : e);
+  }
+}
+
+function scheduleScoresSave() {
+  scoresDirty = true;
+  if (scoresSaveTimer) return;
+  scoresSaveTimer = setTimeout(() => {
+    scoresSaveTimer = null;
+    saveScoresNow();
+  }, SCORES_SAVE_DEBOUNCE_MS);
+  if (scoresSaveTimer.unref) scoresSaveTimer.unref();
+}
+
+loadScores();
+
+// Rate-limit POST /api/score: и по id, и по IP (принятые POSTы).
+const scoreLastById = new Map(); // id -> ts последнего принятого POST
+const scoreLastByIp = new Map(); // ip -> ts
+function pruneRateMap(map, now) {
+  if (map.size < 2000) return;
+  for (const [k, t] of map) {
+    if (now - t >= SCORE_POST_MIN_MS) map.delete(k);
+  }
+}
+
+// X-Forwarded-For спуфится клиентом, поэтому доверяем ему ТОЛЬКО когда админ
+// явно сказал, что мы за прокси (TRUST_PROXY=1), и берём ПОСЛЕДНИЙ hop —
+// его дописывает сам прокси, подделать его клиент не может.
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+function clientIp(req) {
+  if (TRUST_PROXY) {
+    const xff = req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff.length) {
+      const parts = xff.split(',');
+      const last = parts[parts.length - 1].trim();
+      if (last) return last.slice(0, 64);
+    }
+  }
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+// Глобальный предохранитель: не больше 20 принятых POST /api/score в секунду
+// на процесс — даже армия спуферов не выселит живых игроков мгновенно.
+let postWindowStart = 0;
+let postWindowCount = 0;
+function globalPostAllowed(now) {
+  if (now - postWindowStart >= 1000) { postWindowStart = now; postWindowCount = 0; }
+  if (postWindowCount >= 20) return false;
+  postWindowCount++;
+  return true;
+}
+
 // ---------- HTTP: статика + /healthz ----------
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -71,17 +211,133 @@ function sendText(res, code, text) {
   } catch { /* сокет мог умереть — не падаем */ }
 }
 
-async function handleHttp(req, res) {
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    sendText(res, 405, 'только GET, саар');
+function sendJson(res, code, obj) {
+  try {
+    const body = JSON.stringify(obj);
+    res.writeHead(code, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-length': Buffer.byteLength(body),
+      'cache-control': 'no-store',
+    });
+    res.end(body);
+  } catch { /* сокет мог умереть — не падаем */ }
+}
+
+// Читаем тело запроса с жёстким лимитом; null — слишком большое или сеть порвалась.
+// Сокет не рвём сами: даём хендлеру ответить по-человечески (413), node закроет сам.
+function readBody(req, limit) {
+  return new Promise((resolve) => {
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > limit) {
+      resolve(null);
+      return;
+    }
+    const chunks = [];
+    let size = 0;
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    req.on('data', (chunk) => {
+      if (done) return; // лишнее после переполнения просто игнорируем
+      size += chunk.length;
+      if (size > limit) { finish(null); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => finish(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', () => finish(null));
+  });
+}
+
+// Публичная метка игрока: усечённый sha256 от id. По ней клиент узнаёт «свою»
+// строку в топе, но восстановить из неё секретный id нельзя.
+function tagOf(id) {
+  return crypto.createHash('sha256').update(String(id)).digest('hex').slice(0, 8);
+}
+
+// GET /api/scores → топ-20 по money (убыв.).
+function handleGetScores(res) {
+  const top = [...scores.entries()]
+    .sort(([, a], [, b]) => (b.money - a.money) || (a.ts - b.ts))
+    .slice(0, SCORES_TOP)
+    .map(([id, r]) => ({
+      tag: tagOf(id),
+      name: r.name, money: r.money, quests: r.quests,
+      hits: r.hits, battles: r.battles, photos: r.photos, ts: r.ts,
+    }));
+  sendJson(res, 200, { scores: top });
+}
+
+// POST /api/score → сохранить лучший результат игрока.
+async function handlePostScore(req, res) {
+  const body = await readBody(req, SCORE_MAX_BODY);
+  if (body === null) {
+    sendText(res, 413, 'слишком много букв, саар');
     return;
   }
 
+  let msg;
+  try { msg = JSON.parse(body); } catch { msg = null; }
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg)
+      || typeof msg.id !== 'string' || !msg.id.trim()) {
+    sendText(res, 400, 'кривые данные, саар');
+    return;
+  }
+  const id = msg.id.trim().slice(0, 64);
+
+  // Rate-limit: ≥5 с между принятыми POST с одного id И с одного IP. Молча 429.
+  const now = Date.now();
+  if (!globalPostAllowed(now)) {
+    sendText(res, 429, 'не так часто, саар');
+    return;
+  }
+  const ip = clientIp(req);
+  const lastById = scoreLastById.get(id) || 0;
+  const lastByIp = scoreLastByIp.get(ip) || 0;
+  if (now - lastById < SCORE_POST_MIN_MS || now - lastByIp < SCORE_POST_MIN_MS) {
+    sendText(res, 429, 'не так часто, саар');
+    return;
+  }
+  pruneRateMap(scoreLastById, now);
+  pruneRateMap(scoreLastByIp, now);
+  scoreLastById.set(id, now);
+  scoreLastByIp.set(ip, now);
+
+  const incoming = sanitizeScore({ ...msg, ts: now });
+  const existing = scores.get(id);
+  if (!existing) {
+    if (scores.size >= SCORES_MAX_IDS) evictWorstScore();
+    scores.set(id, incoming);
+  } else if (incoming.money > existing.money) {
+    scores.set(id, incoming);        // новый рекорд — заменяем целиком
+  } else {
+    existing.name = incoming.name;   // имя всегда обновляется последним присланным
+  }
+  scheduleScoresSave();
+  sendJson(res, 200, { ok: true });
+}
+
+async function handleHttp(req, res) {
   let pathname;
   try {
     pathname = decodeURIComponent(new URL(req.url || '/', 'http://localhost').pathname);
   } catch {
     sendText(res, 400, 'кривой адрес, саар');
+    return;
+  }
+
+  // API скорборда — до общего запрета не-GET методов.
+  if (pathname === '/api/scores') {
+    if (req.method === 'GET') handleGetScores(res);
+    else sendText(res, 405, 'тут только GET, саар');
+    return;
+  }
+  if (pathname === '/api/score') {
+    if (req.method === 'POST') await handlePostScore(req, res);
+    else sendText(res, 405, 'тут только POST, саар');
+    return;
+  }
+
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendText(res, 405, 'только GET, саар');
     return;
   }
 
@@ -92,6 +348,12 @@ async function handleHttp(req, res) {
 
   if (pathname.includes('\0')) {
     sendText(res, 400, 'кривой адрес, саар');
+    return;
+  }
+  // приватные пути не раздаём: файл очков (uid игроков!), dot-каталоги (.git и пр.)
+  if (pathname === '/data' || pathname.startsWith('/data/')
+      || pathname.split('/').some((seg) => seg.startsWith('.') && seg !== '.' && seg !== '..')) {
+    sendText(res, 404, 'не нашлось, саар :(');
     return;
   }
   if (pathname === '/') pathname = '/index.html';
@@ -310,6 +572,11 @@ function shutdown(signal) {
   shuttingDown = true;
   console.log(`[server] получен ${signal} — завершаемся, саар…`);
   clearInterval(pingTimer);
+  // Финальная запись очков — до того, как нас убьют окончательно.
+  try {
+    if (scoresSaveTimer) { clearTimeout(scoresSaveTimer); scoresSaveTimer = null; }
+    saveScoresNow();
+  } catch { /* даже тут не падаем */ }
   for (const ws of wss.clients) {
     try { ws.close(1001, 'server shutdown'); } catch {}
   }
