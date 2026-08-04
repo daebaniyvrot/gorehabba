@@ -38,6 +38,13 @@ node server/server.js          # http://localhost:8137
 docker compose up -d --build   # см. DEPLOY.md
 ```
 
+## Релизы
+
+Релизы собираются вручную экшеном «Релиз» (Actions → Релиз → Run workflow, версия
+вида `1.1.0` без `v`): прогоняются тесты и прод-репетиция, мультиарх-образ уезжает в
+`ghcr.io/daebaniyvrot/gorehabba` (`:{версия}` и `:latest`), создаются git-тег `v{версия}`
+и GitHub Release. Деплой из готового образа — в [DEPLOY.md](DEPLOY.md).
+
 ## Управление
 
 WASD — бег · Space — прыжок (двойной!) · ЛКМ — замах/бросок · ПКМ — зонтик ·

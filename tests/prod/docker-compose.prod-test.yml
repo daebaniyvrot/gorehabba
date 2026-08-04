@@ -1,0 +1,35 @@
+# Прод-репетиция «Гарехаббы»: тот же образ, что поедет на сервер, но за
+# nginx-прокси — репликой боевой связки (v1nce.conf, префикс /fest).
+# У приложения НЕТ published-портов — снаружи только прокси на 8180, как на проде.
+# Образ задаётся через env IMAGE (default garehabba:prod-test) — так релизный
+# workflow может подсунуть свежесобранный образ без правок этого файла.
+name: garehabba-prod-test
+
+services:
+  garehabba:
+    image: ${IMAGE:-garehabba:prod-test}
+    environment:
+      PORT: "8137"
+      SCORES_FILE: /app/data/scores.json
+      TRUST_PROXY: "1" # за прокси доверяем последнему hop'у X-Forwarded-For
+    volumes:
+      - prod-test-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8137/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 3s
+
+  proxy:
+    image: nginx:alpine
+    depends_on:
+      garehabba:
+        condition: service_healthy
+    ports:
+      - "${PROXY_PORT:-8180}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  prod-test-data:

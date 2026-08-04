@@ -41,11 +41,4 @@ if (typeof globalThis.performance === 'undefined') {
   globalThis.performance = { now: () => Date.now() };
 }
 
-// Свежая копия модуля состояния между тестами: import с уникальным query.
-let bust = 0;
-export async function freshStateModule() {
-  bust++;
-  return import(new URL(`../../src/state.js?bust=${bust}`, import.meta.url).href);
-}
-
 export { MemoryStorage };

@@ -41,8 +41,32 @@ jobs:
             node --check "$f"
           done
 
-      - name: Тесты
-        run: npm test
+      - name: Тесты с покрытием
+        # pipefail включён (shell: bash), поэтому падение тестов не маскируется tee.
+        run: npm run test:coverage 2>&1 | tee coverage-stdout.log
+
+      - name: Таблица покрытия в сводку
+        if: always()
+        run: |
+          if [ -f coverage-stdout.log ]; then
+            {
+              echo "## Покрытие тестами"
+              echo
+              echo '```'
+              sed -n '/start of coverage report/,/end of coverage report/p' coverage-stdout.log \
+                | { grep -v 'of coverage report' || true; } \
+                | sed 's/^ℹ //'
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Артефакт с lcov-отчётом
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          if-no-files-found: warn
 
   docker:
     name: Докер-смоук

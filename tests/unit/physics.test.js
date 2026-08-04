@@ -3,6 +3,7 @@
 import '../helpers/stubs.js';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import * as THREE from 'three';
 import { createProjectiles } from '../../src/physics.js';
 import { state, bus } from '../../src/state.js';
 
@@ -23,13 +24,26 @@ function makeScene() {
   };
 }
 
-function makeWorld() {
+function makeWorld(overrides = {}) {
   return {
     colliders: [],
     groundY: () => 0,
     bounds: { minX: -56, maxX: 56, minZ: -56, maxZ: 56 },
+    ...overrides,
   };
 }
+
+// Меши в группе физики: снаряды отбрасывают тень (castShadow=true),
+// декали — нет; Points частиц — не isMesh. Так их и различаем.
+function visibleProjectiles(scene) {
+  return scene.added[0].children.filter((c) => c.isMesh && c.visible && c.castShadow);
+}
+
+function visibleDecals(scene) {
+  return scene.added[0].children.filter((c) => c.isMesh && c.visible && !c.castShadow);
+}
+
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
 
 function makeTarget(id, pos, opts = {}) {
   return {
@@ -192,5 +206,295 @@ describe('physics.js — баллистика лепёшек', () => {
     // и после этого симуляция не падает
     const warns = withWarnCapture(() => simulate(proj, 1));
     assert.equal(warns.filter((w) => w.includes('[physics]')).length, 0, 'update не ловил исключений');
+  });
+});
+
+describe('physics.js — коллайдеры (THREE.Box3)', () => {
+  it('шлепок о стену: снаряд лопается с декалью на грани, цель за стеной цела', () => {
+    const scene = makeScene();
+    const wall = new THREE.Box3(V(-8, 0, -5.5), V(8, 4, -5));
+    const proj = createProjectiles(scene, makeWorld({ colliders: [wall] }));
+    const behind = makeTarget('behind', { x: 0, y: 0, z: -8 });
+    proj.registerTarget(behind);
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 1 });
+    simulate(proj, 1);
+
+    assert.equal(behind.hits.length, 0, 'цель за стеной не поражена');
+    assert.equal(visibleProjectiles(scene).length, 0, 'снаряд деактивирован');
+    const decals = visibleDecals(scene);
+    assert.equal(decals.length, 1, 'ровно одна декаль-шлепок');
+    const dp = decals[0].position;
+    assert.ok(dp.z > -5.01 && dp.z < -4.9, `декаль на передней грани стены, z=${dp.z}`);
+    assert.ok(Math.abs(dp.x) < 1 && dp.y > 0 && dp.y < 1.5, 'декаль в месте удара');
+    // лопнувший снаряд больше не угроза
+    assert.equal(proj.threats({ x: 0, y: 0, z: -8 }, 1.2).length, 0);
+  });
+
+  it('нормаль по ближайшей грани: удар о каждую из шести граней даёт декаль', () => {
+    const cases = [
+      { name: '+z', box: new THREE.Box3(V(-8, 0, -5.5), V(8, 4, -5)), from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 } },
+      { name: '-z', box: new THREE.Box3(V(-8, 0, 5), V(8, 4, 5.5)), from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: 1 } },
+      { name: '-x', box: new THREE.Box3(V(2, 0, -1), V(3, 2, 1)), from: { x: 0, y: 1, z: 0 }, dir: { x: 1, y: 0, z: 0 } },
+      { name: '+x', box: new THREE.Box3(V(-3, 0, -1), V(-2, 2, 1)), from: { x: 0, y: 1, z: 0 }, dir: { x: -1, y: 0, z: 0 } },
+      { name: '+y', box: new THREE.Box3(V(-1, 0, -1), V(1, 1, 1)), from: { x: 0, y: 3, z: 0 }, dir: { x: 0, y: -1, z: 0 } },
+      { name: '-y', box: new THREE.Box3(V(-1, 2, -1), V(1, 3, 1)), from: { x: 0, y: 0.5, z: 0 }, dir: { x: 0, y: 1, z: 0 } },
+    ];
+    for (const c of cases) {
+      const scene = makeScene();
+      const proj = createProjectiles(scene, makeWorld({ colliders: [c.box] }));
+      proj.throwDung({ from: c.from, dir: c.dir, owner: 't', power: 1 });
+      simulate(proj, 0.5);
+      assert.equal(visibleProjectiles(scene).length, 0, `грань ${c.name}: снаряд лопнул`);
+      assert.equal(visibleDecals(scene).length, 1, `грань ${c.name}: ровно одна декаль`);
+    }
+  });
+
+  it('кривые коллайдеры (null, {}, без max) молча пропускаются', () => {
+    const scene = makeScene();
+    const junk = [null, {}, { min: { x: -1, y: 0, z: -1 } }];
+    const proj = createProjectiles(scene, makeWorld({ colliders: junk }));
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 0.5 });
+    const warns = withWarnCapture(() => simulate(proj, 3));
+    assert.equal(warns.filter((w) => w.includes('[physics]')).length, 0, 'мусор в colliders не роняет физику');
+    assert.equal(visibleProjectiles(scene).length, 0, 'снаряд пролетел мимо мусора и лопнул о землю');
+  });
+
+  it('пул декалей: 85 шлепков подряд переиспользуют самые старые из 80', () => {
+    const scene = makeScene();
+    const wall = new THREE.Box3(V(-30, 0, -5.5), V(30, 5, -5));
+    const proj = createProjectiles(scene, makeWorld({ colliders: [wall] }));
+    const throwAt = (x) => proj.throwDung({ from: { x, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 1 });
+    const warns = withWarnCapture(() => {
+      for (let i = 0; i < 40; i++) throwAt(i - 20);
+      simulate(proj, 1); // все 40 шлёпнулись
+      for (let i = 0; i < 40; i++) throwAt(i - 20);
+      simulate(proj, 1); // пул декалей ровно полон (80)
+      for (let i = 0; i < 5; i++) throwAt(i - 2);
+      simulate(proj, 1); // 81-я и далее — переиспользование самых старых
+    });
+    assert.equal(warns.filter((w) => w.includes('[physics]')).length, 0);
+    assert.equal(visibleDecals(scene).length, 80, 'видимых декалей ровно с пул — старые переиспользованы');
+    assert.equal(visibleProjectiles(scene).length, 0, 'все снаряды лопнули');
+  });
+
+  it('декаль стареет: растворяется в последние секунды и исчезает после DECAL_LIFE', () => {
+    const scene = makeScene();
+    const wall = new THREE.Box3(V(-8, 0, -5.5), V(8, 4, -5));
+    const proj = createProjectiles(scene, makeWorld({ colliders: [wall] }));
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 1 });
+    simulate(proj, 1); // удар на ~0.25 c, декали ~0.75 c
+    const decals = visibleDecals(scene);
+    assert.equal(decals.length, 1);
+    const mesh = decals[0];
+    const fullOpacity = mesh.material.opacity;
+
+    simulate(proj, 16.5); // возраст ~17.25 c — фаза растворения (DECAL_LIFE=20, FADE=4)
+    assert.equal(mesh.visible, true, 'декаль ещё видна в фазе растворения');
+    assert.ok(mesh.material.opacity < fullOpacity,
+      `прозрачность падает: ${mesh.material.opacity} < ${fullOpacity}`);
+
+    simulate(proj, 3.5); // возраст ~20.75 c ≥ DECAL_LIFE
+    assert.equal(mesh.visible, false, 'декаль исчезла после DECAL_LIFE');
+    assert.equal(visibleDecals(scene).length, 0);
+  });
+
+  it('исключение внутри шага (коллайдер без getCenter) ловится update-ом с предупреждением', () => {
+    const scene = makeScene();
+    // проходит guard (есть min/max), но box.getCenter не функция → TypeError внутри try
+    const evil = { min: { x: -5, y: -5, z: -5 }, max: { x: 5, y: 5, z: 5 } };
+    const proj = createProjectiles(scene, makeWorld({ colliders: [evil] }));
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 0.5 });
+    const warns = withWarnCapture(() => proj.update(DT));
+    assert.ok(warns.some((w) => w.includes('[physics] update')), 'исключение поймано и залогировано');
+  });
+});
+
+describe('physics.js — границы мира и время жизни', () => {
+  it('вылет за kill-границы деактивирует снаряд без шлепка', () => {
+    const scene = makeScene();
+    // земли нет (groundY очень низко), границы узкие → kill на ±13
+    const proj = createProjectiles(scene, makeWorld({
+      groundY: () => -1000,
+      bounds: { minX: -1, maxX: 1, minZ: -1, maxZ: 1 },
+    }));
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: 1 }, owner: 't', power: 1 });
+    simulate(proj, 2); // 22 м/с → за границей через ~0.6 c
+    assert.equal(visibleProjectiles(scene).length, 0, 'снаряд погашен за границей мира');
+    assert.equal(visibleDecals(scene).length, 0, 'шлепка нет — земли он не коснулся');
+  });
+
+  it('MAX_AGE: снаряд в вечном падении гаснет после 12 с', () => {
+    const scene = makeScene();
+    const proj = createProjectiles(scene, makeWorld({
+      groundY: () => -1e9,
+      bounds: { minX: -1e6, maxX: 1e6, minZ: -1e6, maxZ: 1e6 },
+    }));
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 0 });
+    const warns = withWarnCapture(() => simulate(proj, 12.5));
+    assert.equal(warns.filter((w) => w.includes('[physics]')).length, 0);
+    assert.equal(visibleProjectiles(scene).length, 0, 'снаряд умер от старости');
+  });
+
+  it('мир не передан: дефолтные границы и земля y=0, снаряд отскакивает и шлёпается', () => {
+    const scene = makeScene();
+    const proj = createProjectiles(scene, undefined);
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0.2, z: -1 }, owner: 't', power: 0.5 });
+    const warns = withWarnCapture(() => simulate(proj, 4));
+    assert.equal(warns.filter((w) => w.includes('[physics]')).length, 0);
+    assert.equal(visibleProjectiles(scene).length, 0, 'снаряд отлетал своё');
+    assert.equal(visibleDecals(scene).length, 1, 'шлепок о дефолтную землю');
+  });
+
+  it('bounds без полей и groundY не-функция: работают дефолты (?? -56 и т.п.)', () => {
+    const scene = makeScene();
+    const proj = createProjectiles(scene, { bounds: {}, groundY: 42, colliders: [] });
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 0.5 });
+    const warns = withWarnCapture(() => simulate(proj, 4));
+    assert.equal(warns.filter((w) => w.includes('[physics]')).length, 0);
+    assert.equal(visibleProjectiles(scene).length, 0, 'снаряд лопнул о землю y=0');
+  });
+
+  it('низкий горизонтальный бросок у земли: лопается сразу (vel.y ≥ −1.2 — без отскока)', () => {
+    const scene = makeScene();
+    const proj = createProjectiles(scene, makeWorld());
+    proj.throwDung({ from: { x: 0, y: 0.14, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 0 });
+    simulate(proj, 0.5);
+    assert.equal(visibleProjectiles(scene).length, 0, 'снаряд лопнул');
+    assert.equal(visibleDecals(scene).length, 1, 'один шлепок о землю');
+  });
+});
+
+describe('physics.js — guard-ы кривых аргументов', () => {
+  it('registerTarget: null и объекты без getPosition молча игнорируются', () => {
+    const scene = makeScene();
+    const proj = createProjectiles(scene, makeWorld());
+    assert.doesNotThrow(() => {
+      proj.registerTarget(null);
+      proj.registerTarget(undefined);
+      proj.registerTarget({ id: 'no-getpos' });
+      proj.registerTarget({ id: 'bad', getPosition: 'не функция' });
+    });
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 0.5 });
+    const warns = withWarnCapture(() => simulate(proj, 3));
+    assert.equal(warns.filter((w) => w.includes('[physics]')).length, 0, 'полёт сквозь мусорные цели не падает');
+    assert.equal(visibleProjectiles(scene).length, 0, 'снаряд спокойно долетел до земли');
+  });
+
+  it('цель с бросающим getPosition и цель с null-позицией пропускаются, честная — поражается', () => {
+    const proj = createProjectiles(makeScene(), makeWorld());
+    const evil = { id: 'evil', getPosition() { throw new Error('нет позиции, саар'); }, onHit() { assert.fail('evil не должен ловить'); } };
+    const ghost = { id: 'ghost', getPosition: () => null, onHit() { assert.fail('ghost не должен ловить'); } };
+    const honest = makeTarget('honest', { x: 0, y: 0, z: -5 });
+    proj.registerTarget(evil);
+    proj.registerTarget(ghost);
+    proj.registerTarget(honest);
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 1 });
+    simulate(proj, 1);
+    assert.equal(honest.hits.length, 1, 'честная цель за кривыми — поражена');
+  });
+
+  it('цель без onHit просто лопает снаряд (без декали)', () => {
+    const scene = makeScene();
+    const proj = createProjectiles(scene, makeWorld());
+    proj.registerTarget({ id: 'mute', getPosition: () => ({ x: 0, y: 0, z: -5 }) });
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 1 });
+    simulate(proj, 1);
+    assert.equal(visibleProjectiles(scene).length, 0, 'снаряд лопнул о цель');
+    assert.equal(visibleDecals(scene).length, 0, 'попадание в цель — без декали');
+  });
+
+  it('onHit, бросающий исключение, логируется и не роняет физику', () => {
+    const scene = makeScene();
+    const proj = createProjectiles(scene, makeWorld());
+    const angry = { id: 'angry', getPosition: () => ({ x: 0, y: 0, z: -5 }), onHit() { throw new Error('ай, саар'); } };
+    proj.registerTarget(angry);
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 1 });
+    const warns = withWarnCapture(() => simulate(proj, 1));
+    assert.ok(warns.some((w) => w.includes('target.onHit')), 'исключение цели залогировано');
+    assert.equal(visibleProjectiles(scene).length, 0, 'снаряд всё равно лопнул');
+  });
+
+  it('снаряд пролетает НАД низкой целью (height) без попадания', () => {
+    const proj = createProjectiles(makeScene(), makeWorld());
+    const shorty = makeTarget('shorty', { x: 0, y: 0, z: -3 }, { height: 0.4 });
+    proj.registerTarget(shorty);
+    proj.throwDung({ from: { x: 0, y: 2, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 1 });
+    simulate(proj, 2);
+    assert.equal(shorty.hits.length, 0, 'снаряд выше роста цели — мимо');
+  });
+
+  it('throwDung без opts/from/dir — тихий no-op без событий', () => {
+    const proj = createProjectiles(makeScene(), makeWorld());
+    const events = [];
+    const off = bus.on('throw', (d) => events.push(d));
+    try {
+      assert.doesNotThrow(() => {
+        proj.throwDung();
+        proj.throwDung(null);
+        proj.throwDung({ from: { x: 0, y: 1, z: 0 } });
+        proj.throwDung({ dir: { x: 0, y: 0, z: -1 } });
+      });
+      assert.equal(events.length, 0, 'кривые броски не эмитят throw');
+    } finally { off(); }
+  });
+
+  it('throwDung: нулевой dir → запасное направление, дефолтные owner "?" и power', () => {
+    const scene = makeScene();
+    const proj = createProjectiles(scene, makeWorld());
+    const events = [];
+    const off = bus.on('throw', (d) => events.push(d));
+    try {
+      proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: 0 } }); // без power и owner
+      assert.deepEqual(events, [{ owner: '?' }]);
+      assert.equal(visibleProjectiles(scene).length, 1, 'снаряд полетел с запасным направлением');
+
+      proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { y: 1 }, owner: 'up' }); // x/z отсутствуют → 0
+      assert.deepEqual(events[1], { owner: 'up' });
+    } finally { off(); }
+  });
+
+  it('state.stats отсутствует — бросок игрока не падает', () => {
+    const proj = createProjectiles(makeScene(), makeWorld());
+    const realStats = state.stats;
+    state.stats = null;
+    try {
+      assert.doesNotThrow(() =>
+        proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 'player', power: 0.5 }));
+    } finally { state.stats = realStats; }
+  });
+
+  it('threats: null-позиция, отсутствующий y и кривой горизонт обрабатываются', () => {
+    const proj = createProjectiles(makeScene(), makeWorld());
+    assert.equal(proj.threats(null).length, 0, 'без позиции угроз нет');
+    proj.throwDung({ from: { x: 0, y: 1.2, z: 6 }, dir: { x: 0, y: 0, z: -1 }, owner: 'a', power: 1 });
+    assert.equal(proj.threats({ x: 0, z: 0 }).length, 1, 'горизонт по умолчанию, y точки → 0');
+    assert.equal(proj.threats({ x: 0, y: 0, z: 0 }, -5).length, 1, 'отрицательный горизонт → дефолтный');
+  });
+
+  it('threats: два снаряда в одну точку — две угрозы', () => {
+    const proj = createProjectiles(makeScene(), makeWorld());
+    proj.throwDung({ from: { x: 0, y: 1.2, z: 6 }, dir: { x: 0, y: 0, z: -1 }, owner: 'a', power: 1 });
+    proj.throwDung({ from: { x: 0, y: 1.2, z: -6 }, dir: { x: 0, y: 0, z: 1 }, owner: 'b', power: 1 });
+    assert.equal(proj.threats({ x: 0, y: 0, z: 0 }, 1.2).length, 2);
+  });
+
+  it('threats: снаряд упадёт раньше, чем долетит — не угроза', () => {
+    const proj = createProjectiles(makeScene(), makeWorld());
+    // 8 м/с с высоты 0.5 — упадёт через ~0.3 c метрах в двух от старта
+    proj.throwDung({ from: { x: 0, y: 0.5, z: 20 }, dir: { x: 0, y: 0, z: -1 }, owner: 'a', power: 0 });
+    assert.equal(proj.threats({ x: 0, y: 0, z: 0 }, 1.2).length, 0);
+  });
+
+  it('update с неположительным dt — no-op', () => {
+    const scene = makeScene();
+    const proj = createProjectiles(scene, makeWorld());
+    proj.throwDung({ from: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 }, owner: 't', power: 1 });
+    const mesh = visibleProjectiles(scene)[0];
+    const z0 = mesh.position.z;
+    proj.update(0);
+    proj.update(-1);
+    proj.update(NaN);
+    assert.equal(mesh.position.z, z0, 'снаряд не сдвинулся');
+    assert.equal(mesh.visible, true, 'и не погашен');
   });
 });
