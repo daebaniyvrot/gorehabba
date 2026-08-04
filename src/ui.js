@@ -209,12 +209,72 @@ export function createUI() {
       questPanel.appendChild(item);
     }
 
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;';
+
+    const share = document.createElement('button');
+    share.className = 'btn primary';
+    share.textContent = '📣 Поделиться результатами';
+    share.addEventListener('click', () => shareResults(share));
+    row.appendChild(share);
+
     const btn = document.createElement('button');
     btn.className = 'btn';
     btn.textContent = 'Закрыть (Tab)';
-    btn.style.marginTop = '14px';
     btn.addEventListener('click', toggleQuests);
-    questPanel.appendChild(btn);
+    row.appendChild(btn);
+    questPanel.appendChild(row);
+  }
+
+  function shareResults(btnEl) {
+    try {
+      const lines = Array.isArray(state.questLines) ? state.questLines : [];
+      const done = lines.filter((q) => q && q.done).length;
+      const s = state.stats || {};
+      const url = location.origin + location.pathname;
+      const text =
+        `Гарехабба 💩 — мой фестиваль: квесты ${done}/${lines.length || 8}, ` +
+        `₹${state.money}, попаданий ${s.hits || 0}, побед в торговых битвах ${s.battlesWon || 0}, ` +
+        `фото ${s.photos || 0}${done === (lines.length || 8) ? '. Все квесты выполнены, саар! 🏆' : ''} ` +
+        `Играть: ${url}`;
+      const okUi = () => {
+        if (!btnEl) return;
+        btnEl.textContent = '📣 Готово!';
+        setTimeout(() => { btnEl.textContent = '📣 Поделиться результатами'; }, 1500);
+      };
+      const legacyCopy = () => {
+        // insecure-контекст (http без TLS): share/clipboard недоступны — textarea+execCommand
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none;';
+          document.body.appendChild(ta);
+          ta.select();
+          const ok = document.execCommand('copy');
+          ta.remove();
+          if (ok) {
+            bus.emit('toast', { text: '📋 Скопировано — хвастайся, саар!', ms: 2200 });
+            okUi();
+          } else {
+            bus.emit('toast', { text: 'Не вышло скопировать, саар. Вот текст в консоли.', ms: 2600, cls: 'error' });
+            console.log(text);
+          }
+        } catch (e) { console.log(text); }
+      };
+      if (navigator.share) {
+        navigator.share({ text }).then(okUi).catch((e) => {
+          if (e && e.name === 'AbortError') return; // человек передумал — это не сбой
+          legacyCopy();
+        });
+      } else if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          bus.emit('toast', { text: '📋 Скопировано — хвастайся, саар!', ms: 2200 });
+          okUi();
+        }).catch(legacyCopy);
+      } else {
+        legacyCopy();
+      }
+    } catch (e) { /* не критично */ }
   }
 
   function toggleQuests() {

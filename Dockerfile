@@ -14,5 +14,8 @@ COPY . .
 ENV PORT=8137
 EXPOSE 8137
 
+# Каталог для очков: сюда монтируется volume, node должен уметь писать.
+RUN mkdir -p /app/data && chown -R node:node /app/data
+
 USER node
 CMD ["node", "server/server.js"]

@@ -238,6 +238,22 @@ export function createTouch({ player } = {}) {
   }
   setInterval(refresh, 150); // лёгкий тик: зонт куплен? «E» ещё актуальна?
 
+  // в битве тап В ЛЮБОМ месте экрана — тоже «СААР!» (панель и кнопка выше по z
+  // и перехватывают свои касания сами, двойного счёта нет)
+  const battleCatch = document.createElement('div');
+  battleCatch.id = 'tb-catch';
+  root.appendChild(battleCatch);
+  let lastCatchTap = 0;
+  battleCatch.addEventListener('touchstart', safe((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // мультитач-гард: два пальца — один «СААР!», а не два промаха подряд
+    const now = performance.now();
+    if (now - lastCatchTap < 150) return;
+    lastCatchTap = now;
+    bus.emit('battleTap', {});
+  }), { passive: false });
+
   // menu/shop/stall/tuktuk — всё скрыто; battle — только большая «СААР!»
   function applyMode(m) {
     root.classList.toggle('tc-battle', m === 'battle');

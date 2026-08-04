@@ -148,9 +148,24 @@
 }
 
 /* ---------- Режим торговой битвы: только большая «СААР!» ---------- */
+/* в битве весь touch-root поднимается НАД панелью (z:30): катчер ловит тапы
+   везде (тап по панели = тоже «СААР!»), кнопка — поверх катчера */
+.touch-device #touch-root.tc-battle { z-index: 35; }
 #touch-root.tc-battle .touch-zone,
 #touch-root.tc-battle .touch-btn,
 #touch-root.tc-battle #tj-base { display: none; }
+/* панель битвы ужимаем вверх, чтобы шкалу было видно над кнопкой */
+#ui-root:has(#touch-root.tc-battle) .panel { max-height: 44vh; top: 28%; }
+/* ловец тапов на весь экран (ниже панели z:30 и кнопки z:22) */
+#tb-catch { display: none; }
+#touch-root.tc-battle #tb-catch {
+  display: block;
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  touch-action: none;
+  z-index: 21;
+}
 #touch-root.tc-battle #tb-saar {
   display: flex;
   right: auto;
