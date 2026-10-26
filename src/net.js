@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import { state, bus } from './state.js';
 import { audio } from './audio.js';
+import { getUid } from './identity.js';
 
 // WS-путь строится относительно страницы: / → /ws, /fest/ → /fest/ws (реверс-прокси)
 const SNAP_INTERVAL = 0.1;   // 10 Гц
@@ -369,7 +370,8 @@ export function createNet(opts = {}) {
     if (sentName) {
       try { localStorage.setItem(NAME_KEY, sentName); } catch (e) { /* private mode */ }
     }
-    send({ t: 'hi', name: sentName });
+    // uid скорборда (общий модуль identity) — сервер копит по нему игровое время
+    send({ t: 'hi', name: sentName, uid: getUid() });
   }
 
   function maybeSendSnapshot(dt) {

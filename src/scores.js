@@ -2,6 +2,7 @@
 // Контракт: GET /api/scores (топ-20 по money), POST /api/score {id,name,money,...}.
 // URL всегда ОТНОСИТЕЛЬНО страницы — игра живёт и на /, и на /fest/.
 import { state, bus } from './state.js';
+import { getUid } from './identity.js';
 
 const POLL_MS = 30_000;        // обновление табло в меню
 const SEND_DEBOUNCE_MS = 8_000; // trailing-дебаунс отправки результата
@@ -31,20 +32,8 @@ function init() {
     try { localStorage.setItem(key, value); } catch { /* ну и ладно */ }
   }
 
-  // ---------- Идентичность игрока ----------
-  function makeUid() {
-    const saved = lsGet('garehabba-uid');
-    if (typeof saved === 'string' && saved) return saved.slice(0, 64);
-    let uid = '';
-    try {
-      if (crypto && typeof crypto.randomUUID === 'function') uid = crypto.randomUUID();
-    } catch { /* fallback ниже */ }
-    if (!uid) uid = 'saar-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
-    uid = uid.slice(0, 64);
-    lsSet('garehabba-uid', uid);
-    return uid;
-  }
-  const uid = makeUid();
+  // ---------- Идентичность игрока (общая с net.js — src/identity.js) ----------
+  const uid = getUid();
 
   // Своя строка в топе узнаётся по публичной метке — усечённому sha256(uid),
   // как отдаёт сервер. На insecure-контексте subtle нет — подсветки просто не будет.

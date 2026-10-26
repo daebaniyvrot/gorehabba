@@ -527,7 +527,8 @@ describe('WS: мусор, лимиты сообщений, ошибки прот
   let a;      // «спамер»: живёт через несколько тестов подряд
   const trash = [];
   before(async () => {
-    srv = await startServer();
+    // пер-IP лимит WS отключаем: блок держит несколько сокетов с 127.0.0.1
+    srv = await startServer({ WS_MAX_PER_IP: '100' });
     b = wsConnect(srv.port);
     await b.join('Приёмник');
     lurker = wsConnect(srv.port);
