@@ -78,7 +78,8 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Сборка образа
-        run: docker build -t garehabba:ci .
+        # --pull: базовый образ всегда свежий, а не из кэша раннера
+        run: docker build --pull -t garehabba:ci .
 
       - name: Запуск контейнера (порт 8137, без volume)
         run: docker run -d --name garehabba-ci -p 8137:8137 garehabba:ci

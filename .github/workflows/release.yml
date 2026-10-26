@@ -107,6 +107,7 @@ jobs:
           platforms: linux/amd64
           push: false
           load: true
+          pull: true # базовый образ всегда свежий — кэш не подсунет старый Node
           tags: garehabba:prod-test
           labels: |
             org.opencontainers.image.source=https://github.com/daebaniyvrot/gorehabba
@@ -131,6 +132,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          pull: true # базовый образ всегда свежий — кэш не подсунет старый Node
           tags: |
             ghcr.io/daebaniyvrot/gorehabba:${{ inputs.version }}
             ghcr.io/daebaniyvrot/gorehabba:latest
