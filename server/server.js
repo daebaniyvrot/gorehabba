@@ -12,7 +12,9 @@ import { WebSocketServer } from 'ws';
 // ---------- Конфигурация ----------
 const PORT = Number(process.env.PORT) || 8137;
 const MAX_PLAYERS = 16;             // cap комнаты
-const PING_INTERVAL_MS = 30_000;    // чистка мёртвых сокетов
+const PING_INTERVAL_MS = Number(process.env.PING_INTERVAL_MS) > 0
+  ? Number(process.env.PING_INTERVAL_MS)
+  : 30_000;                         // чистка мёртвых сокетов (env — только для тестов)
 const MAX_MESSAGE_BYTES = 4096;     // максимум на одно WS-сообщение
 const RL_SNAPSHOTS_PER_SEC = 22;    // ~20/с + небольшой запас на джиттер
 const RL_THROWS_PER_SEC = 5;        // ~4/с + запас
@@ -106,17 +108,30 @@ function loadScores() {
   try {
     if (!fs.existsSync(SCORES_FILE)) return;
     const data = JSON.parse(fs.readFileSync(SCORES_FILE, 'utf8'));
-    if (!Array.isArray(data)) throw new Error('ожидался массив записей');
-    for (const rec of data) {
+    // Два формата: легаси-массив записей и новый {scores, playtime}.
+    let recs = null;
+    if (Array.isArray(data)) recs = data;
+    else if (data && typeof data === 'object' && Array.isArray(data.scores)) {
+      recs = data.scores;
+      if (data.playtime && typeof data.playtime === 'object') {
+        for (const [uid, ms] of Object.entries(data.playtime)) {
+          if (typeof uid !== 'string' || !uid) continue;
+          playtimeMs.set(uid.slice(0, 64), clampInt(ms, 0, 8_640_000_000_000));
+          if (playtimeMs.size >= PLAYTIME_MAX_UIDS) break;
+        }
+      }
+    } else throw new Error('ожидался массив записей или {scores, playtime}');
+    for (const rec of recs) {
       if (!rec || typeof rec !== 'object' || typeof rec.id !== 'string' || !rec.id) continue;
       scores.set(rec.id.slice(0, 64), sanitizeScore(rec));
       if (scores.size >= SCORES_MAX_IDS) break;
     }
-    console.log(`[scores] загружено записей: ${scores.size} (${SCORES_FILE})`);
+    console.log(`[scores] загружено записей: ${scores.size}, игрового времени у uid: ${playtimeMs.size} (${SCORES_FILE})`);
   } catch (e) {
     console.warn('[scores] файл очков битый или нечитаемый — начинаем с пустого списка:',
       e && e.message ? e.message : e);
     scores.clear();
+    playtimeMs.clear();
   }
 }
 
@@ -125,13 +140,21 @@ let scoresSaveTimer = null;
 
 // Атомарная запись: tmp + rename, чтобы не оставить полфайла.
 function saveScoresNow() {
+  // Сначала копим время активных сессий (важно при шатдауне): если что-то
+  // натикало — состояние грязное, даже когда очков никто не постил.
+  const accrueNow = Date.now();
+  for (const uid of activePlay.keys()) {
+    if (accruePlaytime(uid, accrueNow)) scoresDirty = true;
+  }
   if (!scoresDirty) return;
   scoresDirty = false;
   try {
     const arr = [];
     for (const [id, r] of scores) arr.push({ id, ...r });
+    const pt = {};
+    for (const [uid, ms] of playtimeMs) pt[uid] = Math.round(ms);
     const tmp = SCORES_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(arr));
+    fs.writeFileSync(tmp, JSON.stringify({ scores: arr, playtime: pt }));
     fs.renameSync(tmp, SCORES_FILE);
   } catch (e) {
     console.warn('[scores] не удалось сохранить очки:', e && e.message ? e.message : e);
@@ -148,7 +171,8 @@ function scheduleScoresSave() {
   if (scoresSaveTimer.unref) scoresSaveTimer.unref();
 }
 
-loadScores();
+// ВНИМАНИЕ: loadScores() вызывается НИЖЕ — после объявления анти-чит-копилки
+// playtimeMs, которую он наполняет (иначе TDZ).
 
 // Rate-limit POST /api/score: и по id, и по IP (принятые POSTы).
 const scoreLastById = new Map(); // id -> ts последнего принятого POST
@@ -159,6 +183,89 @@ function pruneRateMap(map, now) {
     if (now - t >= SCORE_POST_MIN_MS) map.delete(k);
   }
 }
+
+// ---------- Анти-чит: допуск денег по времени живой игры ----------
+// Деньги в POST — клиентские, поэтому верим им только в пределах «допуска»:
+// база + ставка × минуты, проведённые этим uid с живым WS-подключением
+// (клиент шлёт uid в 'hi'). Curl-бот без игры навсегда упирается в базу,
+// а бот с WS-сессией «зарабатывает» не быстрее честного игрока.
+// Env-переопределения — для тестов; дефолты — продовые.
+// Мусор в env не должен молча выключать защиту (NaN сравнения всегда false).
+function envNum(name, def) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return def;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    console.warn(`[config] ${name}=«${raw}» — не число, используем дефолт ${def}`);
+    return def;
+  }
+  return n;
+}
+const SCORE_BASE_ALLOWANCE = envNum('SCORE_BASE_ALLOWANCE', 2000);
+const SCORE_EARN_RATE_PER_MIN = envNum('SCORE_EARN_RATE_PER_MIN', 300);
+const PLAYTIME_MAX_UIDS = envNum('PLAYTIME_MAX_UIDS', 2000);
+// Время копится только «живой» игре: без снапшотов дольше этого окна —
+// uid простаивает (бот с голым авто-pong ничего не зарабатывает).
+const PLAY_IDLE_MS = envNum('PLAY_IDLE_MS', 60_000);
+// И не больше N WS-соединений с одного IP — припаркованные фермы не съедают комнату.
+const WS_MAX_PER_IP = envNum('WS_MAX_PER_IP', 3);
+
+const playtimeMs = new Map();  // uid -> накопленные мс живой игры (персистится с очками)
+const activePlay = new Map();  // uid -> { sockets, since } — открытые WS этого uid
+
+// Перенести «натикавшее» время uid из активной сессии в копилку.
+// Начисляем только если uid подавал признаки жизни (снапшоты/броски) не далее
+// PLAY_IDLE_MS назад — простой сокет с авто-pong время не копит.
+// Возвращает true, если что-то реально начислилось.
+function accruePlaytime(uid, now) {
+  const a = activePlay.get(uid);
+  if (!a || now <= a.since) return false;
+  const idle = now - a.lastActive > PLAY_IDLE_MS;
+  const credited = !idle;
+  if (credited) playtimeMs.set(uid, (playtimeMs.get(uid) || 0) + (now - a.since));
+  a.since = now;
+  return credited;
+}
+
+// Отметка активности uid (зовётся из обработчиков снапшотов/бросков).
+function playTouch(uid, now) {
+  const a = activePlay.get(uid);
+  if (a) a.lastActive = now;
+}
+
+function playStart(uid, now) {
+  if (!uid) return;
+  const a = activePlay.get(uid);
+  if (a) { a.sockets++; return; } // второй сокет того же uid время не удваивает
+  if (!playtimeMs.has(uid) && playtimeMs.size >= PLAYTIME_MAX_UIDS) prunePlaytime();
+  activePlay.set(uid, { sockets: 1, since: now, lastActive: now });
+}
+
+function playStop(uid, now) {
+  const a = activePlay.get(uid);
+  if (!a) return;
+  accruePlaytime(uid, now);
+  a.sockets--;
+  if (a.sockets <= 0) activePlay.delete(uid);
+}
+
+// Копилка переполнена — выкидываем самый «пустой» неактивный uid без рекорда.
+function prunePlaytime() {
+  let worstUid = null, worstMs = Infinity;
+  for (const [uid, ms] of playtimeMs) {
+    if (activePlay.has(uid) || scores.has(uid)) continue;
+    if (ms < worstMs) { worstMs = ms; worstUid = uid; }
+  }
+  if (worstUid !== null) playtimeMs.delete(worstUid);
+}
+
+function moneyAllowance(uid, now) {
+  accruePlaytime(uid, now); // активная сессия засчитывается на лету
+  const minutes = (playtimeMs.get(uid) || 0) / 60000;
+  return Math.min(9_999_999, Math.round(SCORE_BASE_ALLOWANCE + SCORE_EARN_RATE_PER_MIN * minutes));
+}
+
+loadScores();
 
 // X-Forwarded-For спуфится клиентом, поэтому доверяем ему ТОЛЬКО когда админ
 // явно сказал, что мы за прокси (TRUST_PROXY=1), и берём ПОСЛЕДНИЙ hop —
@@ -303,6 +410,9 @@ async function handlePostScore(req, res) {
   scoreLastByIp.set(ip, now);
 
   const incoming = sanitizeScore({ ...msg, ts: now });
+  // Анти-чит: деньги не выше допуска, заработанного живой игрой этого uid.
+  const allowance = moneyAllowance(id, now);
+  if (incoming.money > allowance) incoming.money = allowance;
   const existing = scores.get(id);
   if (!existing) {
     if (scores.size >= SCORES_MAX_IDS) evictWorstScore();
@@ -447,6 +557,9 @@ function broadcast(obj, except) {
 function handleHi(c, msg) {
   if (c.joined) return; // повторный hi игнорируем
   c.name = cleanName(msg.name, c.id);
+  // uid — для анти-чит-копилки игрового времени (необязателен, старые клиенты без него)
+  c.uid = typeof msg.uid === 'string' ? msg.uid.trim().slice(0, 64) : '';
+  if (c.uid) playStart(c.uid, Date.now());
   c.joined = true;
 
   const players = [];
@@ -465,6 +578,7 @@ function handleHi(c, msg) {
 
 function handleSnapshot(c, msg) {
   if (!c.joined) return;
+  if (c.uid) playTouch(c.uid, Date.now()); // признак жизни — время копится
   if (++c.rl.s > RL_SNAPSHOTS_PER_SEC) return; // rate-limit: молча роняем лишнее
 
   const p = vec3(msg.p);
@@ -480,6 +594,7 @@ function handleSnapshot(c, msg) {
 
 function handleThrow(c, msg) {
   if (!c.joined) return;
+  if (c.uid) playTouch(c.uid, Date.now()); // признак жизни — время копится
   if (++c.rl.throw > RL_THROWS_PER_SEC) return;
 
   const from = vec3(msg.from);
@@ -521,6 +636,11 @@ function onMessage(c, data) {
 
 function onClose(c) {
   clients.delete(c.ws);
+  if (c.uid) {
+    playStop(c.uid, Date.now());
+    c.uid = '';
+    scheduleScoresSave(); // зафиксировать натикавшее время
+  }
   if (!c.joined) return;
   c.joined = false;
   broadcast({ t: 'leave', id: c.id });
@@ -528,16 +648,29 @@ function onClose(c) {
   console.log(`[leave] #${c.id} «${c.name}» — игроков: ${joinedCount()}`);
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   if (clients.size >= MAX_PLAYERS) {
     safeSend(ws, { t: 'full' });
     try { ws.close(1013, 'room full'); } catch {}
+    return;
+  }
+  // Не больше WS_MAX_PER_IP соединений с одного IP — фермы припаркованных
+  // сокетов не съедают комнату у честных игроков.
+  const ip = clientIp(req);
+  let fromSameIp = 0;
+  for (const other of clients.values()) {
+    if (other.ip === ip) fromSameIp++;
+  }
+  if (fromSameIp >= WS_MAX_PER_IP) {
+    safeSend(ws, { t: 'full' });
+    try { ws.close(1013, 'too many connections from ip'); } catch {}
     return;
   }
 
   const c = {
     id: nextId++,
     ws,
+    ip,
     name: '',
     joined: false,
     snap: { p: [0, 0, 0], ry: 0, mv: 0, d: 0, u: false },
@@ -563,6 +696,12 @@ const pingTimer = setInterval(() => {
     }
     ws.isAlive = false;
     try { ws.ping(); } catch {}
+  }
+  // копим игровое время активных uid и персистим (дебаунс внутри)
+  if (activePlay.size) {
+    const now = Date.now();
+    for (const uid of activePlay.keys()) accruePlaytime(uid, now);
+    scheduleScoresSave();
   }
 }, PING_INTERVAL_MS);
 

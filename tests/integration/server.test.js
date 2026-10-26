@@ -256,7 +256,8 @@ describe('HTTP: статика и приватные пути', () => {
 describe('Скорборд: валидация, клампы, рейт-лимит и рекорды', () => {
   let srv;
   const ID = 'интеграционный-игрок-1';
-  before(async () => { srv = await startServer(); });
+  // большой базовый допуск — этот блок тестирует старые клампы, а не анти-чит
+  before(async () => { srv = await startServer({ SCORE_BASE_ALLOWANCE: '9999999' }); });
   after(async () => { await stopServer(srv); });
 
   it('битый JSON → 400', async () => {
@@ -430,7 +431,8 @@ describe('WS: комната, hi/welcome, релеи, leave', () => {
 describe('WS: лимит комнаты в 16 подключений', () => {
   let srv;
   const socks = [];
-  before(async () => { srv = await startServer(); });
+  // пер-IP лимит отключаем — этот блок тестирует общий cap комнаты с одного IP
+  before(async () => { srv = await startServer({ WS_MAX_PER_IP: '100' }); });
   after(async () => {
     for (const c of socks) c.terminate();
     await stopServer(srv);
